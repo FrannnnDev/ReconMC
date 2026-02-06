@@ -61,6 +61,9 @@ export const api = {
   // Queue
   getQueueStatus: () => fetchJSON(`${API_BASE}/queue`),
 
+  getQueueEntries: (status = 'all', limit = 100, offset = 0) =>
+    fetchJSON(`${API_BASE}/queue/entries?status=${status}&limit=${limit}&offset=${offset}`),
+
   // Task logs (for scan queue items)
   getTaskLogs: (id, limit = 100, offset = 0) => fetchJSON(`${API_BASE}/tasks/${id}/logs?limit=${limit}&offset=${offset}`),
 

@@ -237,6 +237,30 @@ export async function getQueueStatus(db: Db): Promise<QueueStatus> {
   };
 }
 
+export interface QueueEntryOptions {
+  limit?: number;
+  offset?: number;
+  status?: 'pending' | 'processing' | 'completed' | 'failed' | 'all';
+}
+
+/**
+ * Get scan queue entries with pagination and optional status filter
+ */
+export async function getQueueEntries(db: Db, options: QueueEntryOptions = {}): Promise<typeof scanQueue.$inferSelect[]> {
+  const { limit = 100, offset = 0, status = 'all' } = options;
+
+  const baseQuery = db.select().from(scanQueue);
+
+  const query = status !== 'all'
+    ? baseQuery.where(eq(scanQueue.status, status))
+    : baseQuery;
+
+  return query
+    .orderBy(scanQueue.createdAt)
+    .limit(limit)
+    .offset(offset);
+}
+
 /**
  * Complete a scan - update server history and remove from queue
  */

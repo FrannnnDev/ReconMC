@@ -1,11 +1,14 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 
+let refreshInterval = null;
+let logRefreshInterval = null;
 let currentServerId = null;
 let currentServer = null;
 let selectedScanIndex = 0;
 let showPlayerList = {};
 let logsAutoScroll = true;
+let currentLogs = [];
 let agents = [];
 
 /**
@@ -23,18 +26,6 @@ function getAgentDisplayName(agentId) {
     return 'agent...';
   }
   return agentId || 'Unknown';
-}
-
-/**
- * Format duration in milliseconds to human-readable string
- */
-function formatDuration(ms) {
-  if (!ms || ms < 0) return '-';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60000);
-  const seconds = Math.round((ms % 60000) / 1000);
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 /**
@@ -352,31 +343,235 @@ function formatSectionCodes(text) {
 }
 
 export async function render(container) {
-  const params = new URLSearchParams(window.location.hash.split('?')[1]);
-  currentServerId = params.get('id');
+  container.innerHTML = `
+    <div class="flex flex-between mb-3">
+      <h2>Servers</h2>
+      <button class="btn btn-primary" id="refresh-btn">Refresh</button>
+    </div>
 
-  if (!currentServerId) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-state-icon"></div>
-        <h3>No Server Selected</h3>
-        <p>Please select a server from the <a href="#batches" style="color: var(--accent)">Servers</a> page.</p>
+    <div class="card mb-3">
+      <div class="flex flex-between" style="align-items: center;">
+        <div class="flex flex-gap">
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="all">All</button>
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="online">Online</button>
+          <button class="btn-sm btn-secondary filter-btn" data-filter="offline">Offline</button>
+        </div>
+        <div id="servers-count" class="text-muted">Loading...</div>
       </div>
-    `;
-    return;
+    </div>
+
+    <div class="card">
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Server Address</th>
+              <th>IP / Hostname</th>
+              <th>Status</th>
+              <th>Last Scanned</th>
+              <th>Scans</th>
+              <th>Mode</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="servers-table"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  // Filter buttons
+  container.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.filter;
+      container.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('btn-primary'));
+      container.querySelectorAll('.filter-btn').forEach(b => b.classList.add('btn-secondary'));
+      btn.classList.remove('btn-secondary');
+      btn.classList.add('btn-primary');
+      loadServers(filter);
+    });
+  });
+
+  // Set initial active filter
+  container.querySelector(`[data-filter="all"]`)?.classList.add('btn-primary');
+  container.querySelector(`[data-filter="all"]`)?.classList.remove('btn-secondary');
+
+  document.getElementById('refresh-btn').addEventListener('click', () => loadServers());
+
+  await loadServers();
+  refreshInterval = setInterval(() => loadServers(), 5000);
+}
+
+export function cleanup() {
+  if (refreshInterval) clearInterval(refreshInterval);
+  if (logRefreshInterval) clearInterval(logRefreshInterval);
+  stopObfuscationAnimation();
+  currentServerId = null;
+  currentServer = null;
+  selectedScanIndex = 0;
+  showPlayerList = {};
+  currentLogs = [];
+  logsAutoScroll = true;
+}
+
+async function loadServers(statusFilter = 'all') {
+  try {
+    const servers = await api.getServers(200);
+
+    const filtered = filterServers(servers, statusFilter);
+    const tbody = document.getElementById('servers-table');
+    const countEl = document.getElementById('servers-count');
+
+    if (countEl) {
+      countEl.textContent = `${filtered.length} servers`;
+    }
+
+    if (!tbody) return;
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No servers found</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(server => {
+      const latestResult = server.latestResult;
+      const isOnline = latestResult?.ping?.success;
+      const serverMode = latestResult?.ping?.serverMode || latestResult?.serverMode || 'unknown';
+      const modeIcon = serverMode === 'online' ? '🟢' : serverMode === 'cracked' ? '🔴' : '🟡';
+
+      const lastScanned = server.lastScannedAt
+        ? formatRelativeTime(server.lastScannedAt)
+        : 'Never';
+
+      return `
+        <tr class="clickable" data-server-id="${server.id}">
+          <td>
+            <div style="font-weight: 500;">${escapeHtml(server.serverAddress)}</div>
+          </td>
+          <td>
+            <div>${server.resolvedIp || '-'}</div>
+            ${server.hostname ? `<div class="text-muted"><small>${escapeHtml(server.hostname)}</small></div>` : ''}
+          </td>
+          <td>
+            ${isOnline
+              ? '<span class="badge online">Online</span>'
+              : server.scanCount > 0
+                ? '<span class="badge offline">Offline</span>'
+                : '<span class="badge pending">Pending</span>'
+            }
+          </td>
+          <td>${lastScanned}</td>
+          <td>${server.scanCount}</td>
+          <td>${isOnline ? `${modeIcon} <span class="badge ${serverMode}">${serverMode}</span>` : '-'}</td>
+          <td>
+            <button class="btn btn-sm btn-primary view-btn">View History</button>
+            <button class="btn btn-sm btn-secondary rescan-btn">Rescan</button>
+            <button class="btn btn-sm btn-danger delete-btn">Delete</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('.view-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showServerHistory(btn.dataset.serverId);
+      });
+    });
+
+    tbody.querySelectorAll('.rescan-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const row = btn.closest('tr');
+        const serverId = row.dataset.serverId;
+        try {
+          const server = servers.find(s => s.id === serverId);
+          if (server) {
+            const result = await api.addServers([server.serverAddress]);
+            showToast(`Server added to queue: ${result.added} added, ${result.skipped} skipped`, 'success');
+          }
+        } catch (error) {
+          showToast(`Error re-queuing server: ${error.message}`, 'error');
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const serverId = btn.dataset.deleteId || btn.closest('tr').dataset.serverId;
+        if (confirm('Are you sure you want to delete this server and all its scan history?')) {
+          try {
+            await api.deleteServer(serverId);
+            showToast('Server deleted', 'success');
+            loadServers(statusFilter);
+          } catch (error) {
+            showToast(`Error deleting server: ${error.message}`, 'error');
+          }
+        }
+      });
+    });
+  } catch (error) {
+    showToast(`Error loading servers: ${error.message}`, 'error');
   }
+}
+
+function filterServers(servers, filter) {
+  if (filter === 'all') return servers;
+  if (filter === 'online') return servers.filter(s => s.latestResult?.ping?.success);
+  if (filter === 'offline') return servers.filter(s => !s.latestResult?.ping?.success && s.scanCount > 0);
+  return servers;
+}
+
+function showServerHistory(serverId) {
+  const mainContainer = document.querySelector('main > .flex-1') || document.body;
+
+  currentServerId = serverId;
+  selectedScanIndex = 0;
+  showPlayerList = {};
+  currentLogs = [];
+  logsAutoScroll = true;
+
+  // Get server data
+  api.getServer(serverId).then(server => {
+    if (!server) {
+      showToast('Server not found', 'error');
+      return;
+    }
+    currentServer = server;
+
+    // Load agents for friendly name display
+    api.getAgents().then(agentList => {
+      agents = agentList;
+    }).catch(() => {
+      agents = [];
+    });
+
+    renderServerHistory(mainContainer);
+    startObfuscationAnimation();
+  }).catch(error => {
+    showToast(`Error loading server: ${error.message}`, 'error');
+  });
+}
+
+function renderServerHistory(container) {
+  const server = currentServer;
+  if (!server) return;
+
+  const isOnline = server.latestResult?.ping?.success;
+  const serverMode = server.latestResult?.ping?.serverMode || server.latestResult?.serverMode || 'unknown';
+  const modeIcon = serverMode === 'online' ? '🟢' : serverMode === 'cracked' ? '🔴' : '🟡';
 
   container.innerHTML = `
     <div class="flex flex-between mb-3">
       <div>
-        <h2>Server Details</h2>
-        <div class="text-muted" style="font-size: 0.9rem;">
-          <span id="server-info">Loading...</span>
-        </div>
+        <button class="btn btn-secondary" id="back-btn">← Back to Servers</button>
+        <h2 style="display: inline; margin-left: 1rem;">${escapeHtml(server.serverAddress)}</h2>
+        ${isOnline ? ` <span class="badge online">Online</span>` : server.scanCount > 0 ? ` <span class="badge offline">Offline</span>` : ` <span class="badge pending">Pending</span>`}
+        ${isOnline ? ` <span class="badge ${serverMode}">${modeIcon} ${serverMode}</span>` : ''}
       </div>
-      <div>
-        <button class="btn btn-secondary" id="rescan-btn">Rescan</button>
-        <button class="btn btn-secondary" id="back-btn">Back to Servers</button>
+      <div class="text-muted">
+        ${server.scanCount} scan${server.scanCount !== 1 ? 's' : ''} • First seen ${formatRelativeTime(server.firstSeenAt)}
       </div>
     </div>
 
@@ -389,97 +584,53 @@ export async function render(container) {
       </div>
 
       <div class="card" style="flex: 2;">
-        <div class="card-header">
+        <div class="card-header flex flex-between">
           <h3 class="card-title">Scan Details</h3>
         </div>
         <div id="scan-detail"></div>
       </div>
     </div>
+
+    <div class="card mt-3">
+      <div class="card-header flex flex-between">
+        <h3 class="card-title">Agent Logs</h3>
+        <div class="flex flex-gap">
+          <label class="flex flex-gap" style="align-items: center; font-size: 0.85rem;">
+            <input type="checkbox" id="logs-autoscroll" checked>
+            Auto-scroll
+          </label>
+        </div>
+      </div>
+      <div id="logs-container" class="logs-container"></div>
+    </div>
   `;
 
   document.getElementById('back-btn').addEventListener('click', () => {
-    window.location.hash = '/batches';
+    cleanup();
+    render(container);
   });
 
-  document.getElementById('rescan-btn').addEventListener('click', async () => {
-    try {
-      const server = await api.getServer(currentServerId);
-      const result = await api.addServers([server.serverAddress]);
-      showToast(`Server added to queue: ${result.added} added, ${result.skipped} skipped`, 'success');
-    } catch (error) {
-      showToast(`Error re-queuing server: ${error.message}`, 'error');
-    }
+  document.getElementById('logs-autoscroll').addEventListener('change', (e) => {
+    logsAutoScroll = e.target.checked;
   });
 
-  await loadServer();
-  startObfuscationAnimation();
-}
+  // Build scan history
+  const scanHistory = server.scanHistory || [];
+  const historyList = document.getElementById('scan-history');
 
-export function cleanup() {
-  stopObfuscationAnimation();
-  currentServerId = null;
-  currentServer = null;
-  selectedScanIndex = 0;
-  showPlayerList = {};
-  agents = [];
-  logsAutoScroll = true;
-}
+  // Combine latest result with history
+  const allScans = [...scanHistory];
+  if (server.latestResult && (!scanHistory.length || scanHistory[0]?.result !== server.latestResult)) {
+    allScans.unshift({
+      timestamp: server.lastScannedAt,
+      result: server.latestResult,
+      errorMessage: null,
+    });
+  }
 
-async function loadServer() {
-  try {
-    const server = await api.getServer(currentServerId);
-    if (!server) {
-      showToast('Server not found', 'error');
-      window.location.hash = '/batches';
-      return;
-    }
-
-    currentServer = server;
-
-    // Load agents for friendly name display
-    try {
-      agents = await api.getAgents();
-    } catch {
-      agents = [];
-    }
-
-    // Update server info
-    const infoEl = document.getElementById('server-info');
-    if (infoEl) {
-      const isOnline = server.latestResult?.ping?.success;
-      const serverMode = server.latestResult?.ping?.serverMode || server.latestResult?.serverMode || 'unknown';
-      infoEl.innerHTML = `
-        <strong>${escapeHtml(server.serverAddress)}</strong>
-        ${isOnline ? ` <span class="badge online">Online</span>` : server.scanCount > 0 ? ` <span class="badge offline">Offline</span>` : ` <span class="badge pending">Pending</span>`}
-        ${isOnline ? ` <span class="badge ${serverMode}">${serverMode}</span>` : ''}
-        | Scanned ${server.scanCount} time${server.scanCount !== 1 ? 's' : ''}
-        | First seen ${formatRelativeTime(server.firstSeenAt)}
-      `;
-    }
-
-    // Build scan history from server data
-    const scanHistory = server.scanHistory || [];
-    const historyList = document.getElementById('scan-history');
-    const detailEl = document.getElementById('scan-detail');
-
-    if (!historyList || !detailEl) return;
-
-    if (scanHistory.length === 0 && !server.latestResult) {
-      historyList.innerHTML = '<p class="text-center text-muted">No scans yet</p>';
-      detailEl.innerHTML = '<p class="text-center text-muted">Select a scan to view details</p>';
-      return;
-    }
-
-    // Combine latest result with history
-    const allScans = [...scanHistory];
-    if (server.latestResult && (!scanHistory.length || scanHistory[0]?.result !== server.latestResult)) {
-      allScans.unshift({
-        timestamp: server.lastScannedAt,
-        result: server.latestResult,
-        errorMessage: null,
-      });
-    }
-
+  if (allScans.length === 0) {
+    historyList.innerHTML = '<p class="text-center text-muted p-3">No scans yet</p>';
+  } else {
     historyList.innerHTML = allScans.map((scan, index) => {
       const result = scan.result;
       const isOnline = result?.ping?.success;
@@ -508,16 +659,22 @@ async function loadServer() {
         historyList.querySelectorAll('.task-item').forEach(i => i.classList.remove('active'));
         item.classList.add('active');
         showScanDetail(allScans[selectedScanIndex]);
+        loadLogs(allScans[selectedScanIndex]?.errorMessage ? null : allScans[selectedScanIndex]);
       });
     });
 
-    // Show the most recent scan
+    // Show most recent scan
     if (allScans.length > 0) {
       showScanDetail(allScans[0]);
+      loadLogs(allScans[0]);
     }
-  } catch (error) {
-    showToast(`Error loading server: ${error.message}`, 'error');
   }
+
+  if (logRefreshInterval) clearInterval(logRefreshInterval);
+  logRefreshInterval = setInterval(() => {
+    if (currentLogs.length === 0 || !logsAutoScroll) return;
+    loadLogs(allScans[selectedScanIndex]);
+  }, 5000);
 }
 
 function showScanDetail(scan) {
@@ -613,7 +770,7 @@ function showScanDetail(scan) {
               ${sample.map(p => {
                 const name = p.name || p.username || 'Unknown';
                 const id = p.id;
-                const isValidUUID = id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) && !id.startsWith('00000000');
+                const isValidUUID = id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) && !id.startsWith('00000000');
                 const nameMcUrl = isValidUUID ? `https://namemc.com/profile/${id.replace(/-/g, '')}` : `https://namemc.com/search?q=${encodeURIComponent(name)}`;
                 return `
                   <div class="player-item">
@@ -803,6 +960,67 @@ function showScanDetail(scan) {
       }
     });
   });
+}
+
+async function loadLogs(scan) {
+  // Since we're using the server history, logs are embedded in the scan result
+  // We'll show any error messages or connection details as logs
+  const logsContainer = document.getElementById('logs-container');
+  if (!logsContainer) return;
+
+  const result = scan.result;
+  const logs = [];
+
+  if (scan.errorMessage) {
+    logs.push({ level: 'error', message: scan.errorMessage, timestamp: scan.timestamp });
+  }
+
+  if (result?.ping) {
+    const ping = result.ping;
+    logs.push({ level: 'info', message: `Ping: ${ping.success ? 'Success' : 'Failed'} (${ping.status?.latency ?? 'N/A'}ms)`, timestamp: scan.timestamp });
+    if (ping.serverMode) {
+      logs.push({ level: 'info', message: `Server mode: ${ping.serverMode}`, timestamp: scan.timestamp });
+    }
+  }
+
+  if (result?.connection) {
+    const conn = result.connection;
+    logs.push({ level: 'info', message: `Connection: ${conn.success ? 'Success' : 'Failed'}`, timestamp: scan.timestamp });
+    if (conn.latency) {
+      logs.push({ level: 'info', message: `Latency: ${conn.latency}ms`, timestamp: scan.timestamp });
+    }
+    if (conn.accountType) {
+      logs.push({ level: 'info', message: `Account type: ${conn.accountType}`, timestamp: scan.timestamp });
+    }
+    if (conn.error) {
+      logs.push({ level: 'error', message: `Connection error: ${conn.error.code} - ${conn.error.message}`, timestamp: scan.timestamp });
+    }
+    if (conn.serverPlugins?.plugins) {
+      logs.push({ level: 'info', message: `Plugins found: ${conn.serverPlugins.plugins.length}`, timestamp: scan.timestamp });
+    }
+  }
+
+  currentLogs = logs.reverse();
+  renderLogs(logsContainer, currentLogs);
+}
+
+function renderLogs(container, logs) {
+  if (!container) return;
+
+  if (logs.length === 0) {
+    container.innerHTML = '<div class="text-muted text-center p-3">No logs available for this scan</div>';
+    return;
+  }
+
+  container.innerHTML = logs.map(log => {
+    const levelClass = log.level === 'error' ? 'text-error' : log.level === 'warn' ? 'text-warning' : '';
+    const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
+    return `<div class="log-entry ${levelClass}"><span class="log-time">${time}</span> <span class="log-level">[${log.level.toUpperCase()}]</span> <span class="log-message">${escapeHtml(log.message)}</span></div>`;
+  }).join('\n');
+
+  if (logsAutoScroll) {
+    container.scrollTop = container.scrollHeight;
+  }
 }
 
 function escapeHtml(text) {

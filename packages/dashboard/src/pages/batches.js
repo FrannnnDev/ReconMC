@@ -1,6 +1,5 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
-import { showModal } from '../components/modal.js';
 
 let refreshInterval = null;
 let statusFilter = 'all';
@@ -8,7 +7,7 @@ let statusFilter = 'all';
 export async function render(container) {
   container.innerHTML = `
     <div class="flex flex-between mb-3">
-      <h2>Servers</h2>
+      <h2>Scan Queue</h2>
       <button class="btn btn-primary" id="add-servers-btn">+ Add Servers</button>
     </div>
 
@@ -16,12 +15,12 @@ export async function render(container) {
       <div class="flex flex-between" style="align-items: center;">
         <div class="flex flex-gap">
           <button class="btn btn-sm btn-secondary filter-btn" data-filter="all">All</button>
-          <button class="btn btn-sm btn-secondary filter-btn" data-filter="online">Online</button>
-          <button class="btn btn-sm btn-secondary filter-btn" data-filter="offline">Offline</button>
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="pending">Pending</button>
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="processing">Processing</button>
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="completed">Completed</button>
+          <button class="btn btn-sm btn-secondary filter-btn" data-filter="failed">Failed</button>
         </div>
-        <div class="flex flex-gap" id="queue-status">
-          <span class="text-muted">Loading...</span>
-        </div>
+        <div id="queue-summary" class="text-muted">Loading...</div>
       </div>
     </div>
 
@@ -30,15 +29,15 @@ export async function render(container) {
         <table>
           <thead>
             <tr>
-              <th>Server</th>
+              <th>Server Address</th>
+              <th>IP / Hostname</th>
               <th>Status</th>
-              <th>Last Scanned</th>
-              <th>Scan Count</th>
-              <th>Mode</th>
-              <th>Actions</th>
+              <th>Agent</th>
+              <th>Submitted</th>
+              <th>Started</th>
             </tr>
           </thead>
-          <tbody id="servers-table"></tbody>
+          <tbody id="queue-table"></tbody>
         </table>
       </div>
     </div>
@@ -52,19 +51,17 @@ export async function render(container) {
       container.querySelectorAll('.filter-btn').forEach(b => b.classList.add('btn-secondary'));
       btn.classList.remove('btn-secondary');
       btn.classList.add('btn-primary');
-      loadServers();
+      loadQueue();
     });
   });
 
-  // Set active filter
   container.querySelector(`[data-filter="${statusFilter}"]`)?.classList.add('btn-primary');
   container.querySelector(`[data-filter="${statusFilter}"]`)?.classList.remove('btn-secondary');
 
-  // Add servers button
   document.getElementById('add-servers-btn').addEventListener('click', showAddServersModal);
 
-  await loadServers();
-  refreshInterval = setInterval(loadServers, 3000);
+  await loadQueue();
+  refreshInterval = setInterval(loadQueue, 3000);
 }
 
 export function cleanup() {
@@ -74,102 +71,60 @@ export function cleanup() {
   }
 }
 
-async function loadServers() {
+async function loadQueue() {
   try {
-    const [servers, queueStatus] = await Promise.all([
-      api.getServers(200),
+    const [entries, queueStatus] = await Promise.all([
+      api.getQueueEntries(statusFilter, 200),
       api.getQueueStatus().catch(() => null),
     ]);
 
-    // Update queue status display
-    const statusEl = document.getElementById('queue-status');
-    if (statusEl && queueStatus) {
-      statusEl.innerHTML = `
-        <span class="text-muted">Queue: </span>
-        <span class="badge pending">${queueStatus.pending || 0} pending</span>
-        <span class="badge processing">${queueStatus.processing || 0} processing</span>
-        <span class="text-muted">| Total servers: ${queueStatus.totalServers || 0}</span>
-      `;
+    // Update summary
+    if (queueStatus) {
+      const summaryEl = document.getElementById('queue-summary');
+      if (summaryEl) {
+        summaryEl.innerHTML = `
+          <span class="badge pending">${queueStatus.pending || 0} pending</span>
+          <span class="badge processing">${queueStatus.processing || 0} processing</span>
+          <span class="text-muted">| ${queueStatus.totalServers || 0} servers scanned</span>
+        `;
+      }
     }
 
-    const filtered = filterServers(servers, statusFilter);
-    const tbody = document.getElementById('servers-table');
+    const tbody = document.getElementById('queue-table');
+    if (!tbody) return;
 
-    // Check if tbody exists (may not exist during page transitions)
-    if (!tbody) {
+    if (entries.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No queue entries found</td></tr>`;
       return;
     }
 
-    if (filtered.length === 0) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="6" class="text-center text-muted">No servers found</td>
-        </tr>
-      `;
-      return;
-    }
+    tbody.innerHTML = entries.map(entry => {
+      const statusClass = entry.status || 'pending';
+      const statusIcon = entry.status === 'pending' ? '○'
+        : entry.status === 'processing' ? '⟳'
+          : entry.status === 'completed' ? '✓'
+            : entry.status === 'failed' ? '✗' : '○';
 
-    tbody.innerHTML = filtered.map(server => {
-      const latestResult = server.latestResult;
-      const isOnline = latestResult?.ping?.success;
-      const serverMode = latestResult?.ping?.serverMode || latestResult?.serverMode || 'unknown';
-      const modeIcon = serverMode === 'online' ? '🟢' : serverMode === 'cracked' ? '🔴' : '🟡';
-
-      const lastScanned = server.lastScannedAt
-        ? formatRelativeTime(new Date(server.lastScannedAt))
-        : 'Never';
+      const submittedAt = entry.createdAt ? formatRelativeTime(new Date(entry.createdAt)) : '-';
+      const startedAt = entry.startedAt ? formatRelativeTime(new Date(entry.startedAt)) : '-';
 
       return `
         <tr>
+          <td><code>${escapeHtml(entry.serverAddress)}</code></td>
           <td>
-            <div style="font-weight: 500;">${escapeHtml(server.serverAddress)}</div>
-            ${server.hostname && server.hostname !== server.serverAddress ? `<div class="text-muted"><small>${escapeHtml(server.hostname)}</small></div>` : ''}
-            ${server.resolvedIp ? `<div class="text-muted"><small>${escapeHtml(server.resolvedIp)}</small></div>` : ''}
+            <div>${entry.resolvedIp || '-'}</div>
+            ${entry.hostname ? `<div class="text-muted"><small>${escapeHtml(entry.hostname)}</small></div>` : ''}
           </td>
-          <td>
-            ${isOnline
-              ? '<span class="badge online">Online</span>'
-              : server.scanCount > 0
-                ? '<span class="badge offline">Offline</span>'
-                : '<span class="badge pending">Pending</span>'
-            }
-          </td>
-          <td>${lastScanned}</td>
-          <td>${server.scanCount}</td>
-          <td>${isOnline ? `${modeIcon} <span class="badge ${serverMode}">${serverMode}</span>` : '-'}</td>
-          <td class="actions-cell">
-            <button class="btn btn-sm btn-secondary view-btn" data-id="${server.id}">View</button>
-            <button class="btn btn-sm btn-danger delete-btn" data-id="${server.id}" data-address="${server.serverAddress}">Delete</button>
-          </td>
+          <td><span class="badge ${statusClass}">${statusIcon} ${entry.status}</span></td>
+          <td>${entry.assignedAgentId || '-'}</td>
+          <td>${submittedAt}</td>
+          <td>${startedAt}</td>
         </tr>
       `;
     }).join('');
-
-    tbody.querySelectorAll('.view-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        window.location.hash = `/servers?id=${btn.dataset.id}`;
-      });
-    });
-
-    tbody.querySelectorAll('.delete-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        showDeleteConfirmation(btn.dataset.id, btn.dataset.address);
-      });
-    });
   } catch (error) {
-    showToast(`Error loading servers: ${error.message}`, 'error');
+    showToast(`Error loading queue: ${error.message}`, 'error');
   }
-}
-
-function filterServers(servers, filter) {
-  if (filter === 'all') return servers;
-  if (filter === 'online') {
-    return servers.filter(s => s.latestResult?.ping?.success);
-  }
-  if (filter === 'offline') {
-    return servers.filter(s => !s.latestResult?.ping?.success && s.scanCount > 0);
-  }
-  return servers;
 }
 
 function showAddServersModal() {
@@ -210,40 +165,9 @@ function showAddServersModal() {
       const result = await api.addServers(servers);
       closeModal();
       showToast(`Added ${result.added} servers, skipped ${result.skipped} duplicates`, 'success');
-      loadServers();
+      loadQueue();
     } catch (error) {
       showToast(`Error adding servers: ${error.message}`, 'error');
-    }
-  });
-}
-
-function showDeleteConfirmation(serverId, serverAddress) {
-  const body = `
-    <p>Are you sure you want to delete this server?</p>
-    <p><strong>${escapeHtml(serverAddress)}</strong></p>
-    <p class="text-error">This action cannot be undone. All scan history for this server will be permanently deleted.</p>
-  `;
-
-  const footer = `
-    <button class="btn btn-secondary" id="delete-no">Keep Server</button>
-    <button class="btn btn-danger" id="delete-yes">Delete Server</button>
-  `;
-
-  const { closeModal, overlay } = showModal({
-    title: 'Delete Server',
-    body,
-    footer,
-  });
-
-  overlay.querySelector('#delete-no').addEventListener('click', closeModal);
-  overlay.querySelector('#delete-yes').addEventListener('click', async () => {
-    try {
-      await api.deleteServer(serverId);
-      closeModal();
-      showToast('Server deleted successfully', 'success');
-      loadServers();
-    } catch (error) {
-      showToast(`Error deleting server: ${error.message}`, 'error');
     }
   });
 }
@@ -266,4 +190,30 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// Re-use showModal from batches
+function showModal({ title, body, footer }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <h3>${title}</h3>
+      </div>
+      <div class="modal-body">${body}</div>
+      <div class="modal-footer">${footer}</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const closeModal = () => {
+    overlay.remove();
+  };
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal();
+  });
+
+  return { overlay, closeModal };
 }

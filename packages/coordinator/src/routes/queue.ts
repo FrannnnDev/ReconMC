@@ -5,6 +5,7 @@ import {
   completeScan,
   failScan,
   getQueueStatus,
+  getQueueEntries,
 } from '../services/scanQueueManager.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
@@ -23,6 +24,34 @@ export async function queueRoutes(fastify: FastifyInstance) {
       return reply.code(500).send({ error: 'Failed to get queue status', message: String(err) });
     }
   });
+
+  /**
+   * GET /api/queue/entries
+   * Get queue entries with optional status filter (pending/processing/completed/failed/all)
+   */
+  fastify.get<{ Querystring: { status?: string; limit?: string; offset?: string } }>(
+    '/queue/entries',
+    async (request, reply) => {
+      const { status = 'all', limit = '100', offset = '0' } = request.query;
+      const validStatuses = ['pending', 'processing', 'completed', 'failed', 'all'];
+
+      if (!validStatuses.includes(status)) {
+        return reply.code(400).send({ error: 'Invalid status filter' });
+      }
+
+      try {
+        const entries = await getQueueEntries(db, {
+          status: status as 'pending' | 'processing' | 'completed' | 'failed' | 'all',
+          limit: parseInt(limit, 10),
+          offset: parseInt(offset, 10),
+        });
+        return reply.send(entries);
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.code(500).send({ error: 'Failed to get queue entries', message: String(err) });
+      }
+    }
+  );
 
   /**
    * POST /api/queue/claim
