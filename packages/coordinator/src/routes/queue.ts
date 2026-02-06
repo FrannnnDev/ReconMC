@@ -6,7 +6,7 @@ import {
   failScan,
   getQueueStatus,
   getQueueEntries,
-} from '../services/scanQueueManager.js';
+} from '../services/redisQueueService.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
   const db = createDb();

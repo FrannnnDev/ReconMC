@@ -6,7 +6,7 @@ import {
   getServer,
   deleteServer,
   type AddToQueueResult,
-} from '../services/scanQueueManager.js';
+} from '../services/redisQueueService.js';
 import { eq } from 'drizzle-orm';
 import { servers } from '../db/schema.js';
 

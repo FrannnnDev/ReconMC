@@ -13,6 +13,17 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   coordinator:
     build:
       context: .
@@ -24,11 +35,14 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - DATABASE_URL=postgres://reconmc:${POSTGRES_PASSWORD}@postgres:5432/reconmc
+      - REDIS_URL=redis://redis:6379
       - RECONMC_API_KEY=${RECONMC_API_KEY:-}
       - RECONMC_DISABLE_AUTH=${RECONMC_DISABLE_AUTH:-false}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "3001:3000"
@@ -66,3 +80,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:

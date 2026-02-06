@@ -475,7 +475,8 @@ async function loadServers(statusFilter = 'all') {
     tbody.querySelectorAll('.view-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        showServerHistory(btn.dataset.serverId);
+        const row = btn.closest('tr');
+        showServerHistory(row.dataset.serverId);
       });
     });
 

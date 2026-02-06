@@ -10,6 +10,7 @@ import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
 import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
+import { isRedisAvailable } from './db/redis.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
@@ -41,7 +42,12 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
 
   // Register /api/health BEFORE other routes so it stays public (no auth required)
   fastify.get('/api/health', async (_request, reply) => {
-    return reply.send({ status: 'ok', service: 'coordinator' });
+    const redisAvailable = isRedisAvailable();
+    return reply.send({
+      status: 'ok',
+      service: 'coordinator',
+      redis: redisAvailable ? 'ok' : 'unavailable',
+    });
   });
 
   // Auth status endpoint (public) - lets frontend know if auth is required
