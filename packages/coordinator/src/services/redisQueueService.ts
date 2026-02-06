@@ -121,64 +121,24 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
   let skipped = 0;
   const toAdd: typeof uniqueResolved = [];
 
-  if (redis && redis.status === 'ready') {
-    // Fast path: Check Redis for duplicates
-    const duplicates = await safeRedisCommand<Set<string>>(async (client) => {
-      const pipeline = client.pipeline();
-      for (const r of uniqueResolved) {
-        if (!r) continue;
-        const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
-        pipeline.hexists(REDIS_KEYS.QUEUE_DUPLICATES, key);
-        pipeline.hexists(REDIS_KEYS.QUEUE_PROCESSING, key);
-      }
-      const results = await pipeline.exec();
+  // Check for existing duplicates in PostgreSQL
+  const existingQueue = await db
+    .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port, hostname: scanQueue.hostname })
+    .from(scanQueue)
+    .where(or(eq(scanQueue.status, 'pending'), eq(scanQueue.status, 'processing')));
 
-      const dupes = new Set<string>();
-      results?.forEach((r, idx) => {
-        if (!r) return;
-        const [err, result] = r;
-        if (err) return;
-        const existsInDupes = result as number;
-        const existsInProcessing = results[idx + 1]?.[1] as number;
-        if (existsInDupes === 1 || existsInProcessing === 1) {
-          const item = uniqueResolved[Math.floor(idx / 2)];
-          if (item) {
-            dupes.add(getDedupeKey(item.resolvedIp, item.port, item.hostname));
-          }
-        }
-      });
-      return dupes;
-    });
+  const queueKeys = new Set(
+    existingQueue.map((r) => getDedupeKey(r.resolvedIp ?? '', r.port, r.hostname ?? ''))
+  );
 
-    for (const r of uniqueResolved) {
-      if (!r) continue;
-      const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
-      if (duplicates?.has(key)) {
-        skipped++;
-        continue;
-      }
-      toAdd.push(r);
+  for (const r of uniqueResolved) {
+    if (!r) continue;
+    const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
+    if (queueKeys.has(key)) {
+      skipped++;
+      continue;
     }
-  } else {
-    // Fallback: Check PostgreSQL for duplicates
-    const existingQueue = await db
-      .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port, hostname: scanQueue.hostname })
-      .from(scanQueue)
-      .where(or(eq(scanQueue.status, 'pending'), eq(scanQueue.status, 'processing')));
-
-    const queueKeys = new Set(
-      existingQueue.map((r) => getDedupeKey(r.resolvedIp ?? '', r.port, r.hostname ?? ''))
-    );
-
-    for (const r of uniqueResolved) {
-      if (!r) continue;
-      const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
-      if (queueKeys.has(key)) {
-        skipped++;
-        continue;
-      }
-      toAdd.push(r);
-    }
+    toAdd.push(r);
   }
 
   // Add to PostgreSQL
@@ -206,7 +166,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
         port: inserted.port,
       });
 
-      // Add to Redis pending queue and duplicates set
+      // Add to Redis pending queue as a List (not Hash)
       await safeRedisCommand(async (client) => {
         const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
         const itemData = JSON.stringify({
@@ -216,10 +176,10 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
           port: inserted.port,
           hostname: r.hostname,
         });
-        const pipeline = client.pipeline();
-        pipeline.hset(REDIS_KEYS.QUEUE_PENDING, inserted.id, itemData);
-        pipeline.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, inserted.id);
-        await pipeline.exec();
+        // Push to the end of the list (RPUSH)
+        await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+        // Track in duplicates set
+        await client.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, inserted.id);
       });
     }
   }
@@ -229,7 +189,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
 
 /**
  * Claim next available server from the queue with resource allocation
- * Uses Redis for atomic O(1) operations when available
+ * Uses Redis for atomic O(1) operations when available, falls back to PostgreSQL
  */
 export async function claimFromQueue(db: Db, agentId: string): Promise<ClaimedQueueItem | null> {
   const redis = getRedisClient();
@@ -243,7 +203,7 @@ export async function claimFromQueue(db: Db, agentId: string): Promise<ClaimedQu
 }
 
 /**
- * Fast path: Claim from Redis with atomic operations
+ * Fast path: Claim from Redis List with atomic RPOPLPUSH
  */
 async function claimFromQueueRedis(
   db: Db,
@@ -252,7 +212,7 @@ async function claimFromQueueRedis(
 ): Promise<ClaimedQueueItem | null> {
   if (!redis) return null;
 
-  // Atomically pop from pending queue
+  // Atomically pop from end of pending and push to processing
   const result = await redis.rpoplpush(REDIS_KEYS.QUEUE_PENDING, REDIS_KEYS.QUEUE_PROCESSING);
   if (!result) return null;
 
@@ -260,60 +220,71 @@ async function claimFromQueueRedis(
   try {
     itemData = JSON.parse(result);
   } catch {
-    // Invalid JSON, remove and continue
-    await redis.hdel(REDIS_KEYS.QUEUE_PROCESSING, result);
+    // Invalid JSON, remove from processing and continue
+    await redis.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, result);
     return null;
   }
 
-  // Allocate resources from PostgreSQL (still need DB for account/proxy data)
-  // Use a transaction to ensure atomicity
-  const resources = await db.transaction(async (tx) => await allocateResourcesTx(tx));
-  if (!resources) {
-    // No resources available, put back in pending queue
-    await redis.hset(REDIS_KEYS.QUEUE_PENDING, itemData.id, result);
-    await redis.hdel(REDIS_KEYS.QUEUE_PROCESSING, itemData.id);
-    return null;
+  // Store the queue ID in a separate key for reliable cleanup (not reliant on JSON matching)
+  await redis.setex(REDIS_KEYS.QUEUE_ITEM(itemData.id), 300, agentId); // 5 min TTL
+
+  try {
+    // Use a single transaction for both resource allocation and queue updates
+    return await db.transaction(async (tx) => {
+      const resources = await allocateResourcesTx(tx);
+      if (!resources) {
+        // No resources available, put back in pending queue
+        await redis.rpoplpush(REDIS_KEYS.QUEUE_PROCESSING, REDIS_KEYS.QUEUE_PENDING);
+        await redis.del(REDIS_KEYS.QUEUE_ITEM(itemData.id));
+        return null;
+      }
+
+      // Update PostgreSQL
+      await tx
+        .update(scanQueue)
+        .set({
+          status: 'processing',
+          assignedAgentId: agentId,
+          assignedProxyId: resources.proxy.id,
+          assignedAccountId: resources.account.id,
+          startedAt: new Date(),
+        })
+        .where(eq(scanQueue.id, itemData.id));
+
+      // Update agent status
+      await tx
+        .update(agents)
+        .set({ currentQueueId: itemData.id, status: 'busy' })
+        .where(eq(agents.id, agentId));
+
+      const protocol = (resources.proxy.protocol === 'socks4' ? 'socks4' : 'socks5') as 'socks4' | 'socks5';
+      return {
+        queueId: itemData.id,
+        serverAddress: itemData.serverAddress,
+        port: itemData.port,
+        proxy: {
+          id: resources.proxy.id,
+          host: resources.proxy.host,
+          port: resources.proxy.port,
+          type: protocol,
+          username: resources.proxy.username ?? undefined,
+          password: resources.proxy.password ?? undefined,
+        },
+        account: {
+          id: resources.account.id,
+          type: resources.account.type,
+          username: resources.account.username ?? undefined,
+          accessToken: resources.account.accessToken ?? undefined,
+          refreshToken: resources.account.refreshToken ?? undefined,
+        },
+      };
+    });
+  } catch (err) {
+    // If anything fails, move back to pending and clean up
+    await redis.rpoplpush(REDIS_KEYS.QUEUE_PROCESSING, REDIS_KEYS.QUEUE_PENDING);
+    await redis.del(REDIS_KEYS.QUEUE_ITEM(itemData.id));
+    throw err;
   }
-
-  // Update PostgreSQL
-  await db
-    .update(scanQueue)
-    .set({
-      status: 'processing',
-      assignedAgentId: agentId,
-      assignedProxyId: resources.proxy.id,
-      assignedAccountId: resources.account.id,
-      startedAt: new Date(),
-    })
-    .where(eq(scanQueue.id, itemData.id));
-
-  // Update agent status
-  await db
-    .update(agents)
-    .set({ currentQueueId: itemData.id, status: 'busy' })
-    .where(eq(agents.id, agentId));
-
-  const protocol = (resources.proxy.protocol === 'socks4' ? 'socks4' : 'socks5') as 'socks4' | 'socks5';
-  return {
-    queueId: itemData.id,
-    serverAddress: itemData.serverAddress,
-    port: itemData.port,
-    proxy: {
-      id: resources.proxy.id,
-      host: resources.proxy.host,
-      port: resources.proxy.port,
-      type: protocol,
-      username: resources.proxy.username ?? undefined,
-      password: resources.proxy.password ?? undefined,
-    },
-    account: {
-      id: resources.account.id,
-      type: resources.account.type,
-      username: resources.account.username ?? undefined,
-      accessToken: resources.account.accessToken ?? undefined,
-      refreshToken: resources.account.refreshToken ?? undefined,
-    },
-  };
 }
 
 /**
@@ -385,9 +356,12 @@ export async function getQueueStatus(db: Db): Promise<QueueStatus> {
   let processing = 0;
 
   if (redis && redis.status === 'ready') {
-    // Fast path: Get counts from Redis
-    pending = await redis.hlen(REDIS_KEYS.QUEUE_PENDING) || 0;
-    processing = await redis.hlen(REDIS_KEYS.QUEUE_PROCESSING) || 0;
+    // Clean up orphaned processing items before getting counts
+    await cleanupOrphanedProcessingItems(redis, db);
+
+    // Fast path: Get list lengths from Redis
+    pending = await redis.llen(REDIS_KEYS.QUEUE_PENDING) || 0;
+    processing = await redis.llen(REDIS_KEYS.QUEUE_PROCESSING) || 0;
   } else {
     // Fallback: Query PostgreSQL
     const [pendingResult, processingResult] = await Promise.all([
@@ -412,6 +386,60 @@ export async function getQueueStatus(db: Db): Promise<QueueStatus> {
     failed: failedResult[0]?.count ?? 0,
     totalServers: totalServersResult[0]?.count ?? 0,
   };
+}
+
+/**
+ * Clean up orphaned items in the Redis processing list.
+ * This handles cases where agents crashed after claiming but before completing.
+ * An item is orphaned if it's in Redis processing but not in PostgreSQL processing,
+ * or if the tracking key has expired (agent didn't heartbeat).
+ */
+async function cleanupOrphanedProcessingItems(
+  redis: ReturnType<typeof getRedisClient>,
+  db: Db
+): Promise<void> {
+  if (!redis) return;
+
+  try {
+    const processingList = await redis.lrange(REDIS_KEYS.QUEUE_PROCESSING, 0, -1);
+    if (processingList.length === 0) return;
+
+    // Get all currently processing IDs from PostgreSQL
+    const pgProcessing = await db
+      .select({ id: scanQueue.id })
+      .from(scanQueue)
+      .where(eq(scanQueue.status, 'processing'));
+
+    const pgProcessingIds = new Set(pgProcessing.map((item) => item.id));
+
+    for (const itemStr of processingList) {
+      try {
+        const parsed = JSON.parse(itemStr);
+        const itemId = parsed.id;
+
+        // Check if tracking key exists (should exist if actively processing)
+        const trackingKey = REDIS_KEYS.QUEUE_ITEM(itemId);
+        const trackingExists = await redis.exists(trackingKey);
+
+        // Remove from Redis processing if:
+        // 1. Not in PostgreSQL processing anymore, OR
+        // 2. Tracking key expired (agent crashed/timeout)
+        if (!pgProcessingIds.has(itemId) || trackingExists === 0) {
+          await redis.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, itemStr);
+          // Also clean up the tracking key if it exists
+          if (trackingExists === 1) {
+            await redis.del(trackingKey);
+          }
+        }
+      } catch {
+        // Invalid JSON - remove it
+        await redis.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, itemStr);
+      }
+    }
+  } catch (err) {
+    // Log but don't fail - cleanup is best-effort
+    console.error('Error during Redis processing list cleanup:', err);
+  }
 }
 
 /**
@@ -520,14 +548,29 @@ export async function completeScan(
     })
     .where(eq(scanQueue.id, queueId));
 
-  // Remove from Redis processing queue and duplicates set
+  // Remove from Redis processing list and duplicates set
   if (redis && redis.status === 'ready') {
     const dedupeKey = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
     await safeRedisCommand(async (client) => {
-      const pipeline = client.pipeline();
-      pipeline.hdel(REDIS_KEYS.QUEUE_PROCESSING, queueId);
-      pipeline.hdel(REDIS_KEYS.QUEUE_DUPLICATES, dedupeKey);
-      await pipeline.exec();
+      // Remove the queue item tracking key
+      await client.del(REDIS_KEYS.QUEUE_ITEM(queueId));
+      // Remove from duplicates tracking
+      await client.hdel(REDIS_KEYS.QUEUE_DUPLICATES, dedupeKey);
+      // Remove from processing list by searching for the queue ID in stored items
+      // This is O(n) but processing list should be small
+      const processingList = await client.lrange(REDIS_KEYS.QUEUE_PROCESSING, 0, -1);
+      for (const item of processingList) {
+        try {
+          const parsed = JSON.parse(item);
+          if (parsed.id === queueId) {
+            await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, item);
+            break;
+          }
+        } catch {
+          // Skip invalid JSON entries
+          await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, item);
+        }
+      }
     });
   }
 

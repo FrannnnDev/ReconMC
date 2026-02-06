@@ -126,11 +126,12 @@ export async function updateHeartbeat(
     const pipeline = client.pipeline();
     // Refresh heartbeat TTL
     pipeline.setex(REDIS_KEYS.AGENT_HEARTBEAT(agentId), AGENT_TTL_SECONDS, Date.now().toString());
+    // Always refresh agent data TTL to prevent expiration
+    pipeline.expire(REDIS_KEYS.AGENT_DATA(agentId), AGENT_TTL_SECONDS);
     // Update status in agent data if provided
     if (options?.status) {
       pipeline.hset(REDIS_KEYS.AGENT_DATA(agentId), 'status', options.status);
     }
-    pipeline.expire(REDIS_KEYS.AGENT_DATA(agentId), AGENT_TTL_SECONDS);
     // Ensure still in online set
     pipeline.sadd(REDIS_KEYS.AGENTS_ONLINE, agentId);
     await pipeline.exec();
@@ -144,50 +145,28 @@ export async function listOnlineAgents(db: Db): Promise<Array<typeof agents.$inf
   const now = Date.now();
   const heartbeatThreshold = now - HEARTBEAT_TIMEOUT_MS;
 
-  // Try Redis first for fast online tracking
+  // Check if Redis has any online agents
   const onlineAgentIds = await safeRedisCommand<string[]>(async (client) => {
     const ids = await client.smembers(REDIS_KEYS.AGENTS_ONLINE);
     return ids;
   });
 
+  // If Redis has online agents, query PostgreSQL for complete data
+  // (Redis is used as a fast filter, PostgreSQL provides full details)
   if (onlineAgentIds && onlineAgentIds.length > 0) {
-    // Get agent data from Redis hashes for fast lookup
-    const agentsData = await safeRedisCommand<Array<{ id: string; name: string; status: string }>>(
-      async (client) => {
-        const pipeline = client.pipeline();
-        for (const id of onlineAgentIds) {
-          pipeline.hgetall(REDIS_KEYS.AGENT_DATA(id));
-        }
-        const results = await pipeline.exec();
-        const parsed = results
-          ?.map((r) => (r[1] as Record<string, string> | null))
-          .filter((data): data is Record<string, string> => data !== null && Object.keys(data).length > 0)
-          .map((data) => ({
-            id: data.id,
-            name: data.name,
-            status: data.status,
-          })) ?? [];
-        return parsed;
-      }
-    );
-
-    if (agentsData && agentsData.length > 0) {
-      // For simplicity, return from Redis with offline check
-      return agentsData.map((agent) => ({
-        ...agent,
-        id: agent.id,
-        name: agent.name,
-        status: agent.status as any,
-        lastHeartbeat: new Date(), // Redis agents are by definition online
-        registeredAt: new Date(),
-        currentQueueId: null,
-        secret: null,
-        offline: false,
+    const validIds = onlineAgentIds.filter((id) => id && id.length > 0);
+    if (validIds.length > 0) {
+      // Get full agent data from PostgreSQL
+      const list = await db.select().from(agents);
+      // Mark agents as online/offline based on Redis set
+      return list.map((a) => ({
+        ...a,
+        offline: !validIds.includes(a.id),
       }));
     }
   }
 
-  // Fallback to PostgreSQL
+  // Fallback to PostgreSQL with cleanup
   await removeOfflineAgents(db);
   const list = await db.select().from(agents);
   return list.map((a) => ({
