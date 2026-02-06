@@ -254,6 +254,24 @@ export class CoordinatorAPIClient {
   }
 
   /**
+   * Get server by address (hostname:port or hostname)
+   * Returns null if server not found
+   */
+  async getServerByAddress(host: string, port: number = 25565): Promise<CoordinatorServer | null> {
+    const serverAddress = port !== 25565 ? `${host}:${port}` : host;
+    const response = await fetch(`${this.baseUrl}/api/servers/by-address/${encodeURIComponent(serverAddress)}`, {
+      headers: this.getHeaders(),
+    });
+
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Failed to get server by address: ${response.status}`);
+    }
+
+    return response.json() as Promise<CoordinatorServer>;
+  }
+
+  /**
    * Get servers list
    */
   async getServers(limit: number = 100, offset: number = 0): Promise<CoordinatorServer[]> {
@@ -355,14 +373,11 @@ export class CoordinatorAPIClient {
     const serverAddress = port !== 25565 ? `${host}:${port}` : host;
 
     while (Date.now() - startTime < this.MAX_POLL_TIME_MS) {
-      // Try to find the server in the servers list
-      const servers = await this.getServers(100);
+      // Try to get the server directly by address
+      const server = await this.getServerByAddress(host, port);
 
-      // Find the server by address
-      const server = servers.find(s => s.serverAddress === serverAddress);
-
-      if (server && server.lastScannedAt) {
-        // Server has been scanned at least once
+      if (server && server.lastScannedAt && server.latestResult) {
+        // Server has been scanned and has a result
         const scannedTime = new Date(server.lastScannedAt).getTime();
         const addedTime = startTime;
 
@@ -376,11 +391,11 @@ export class CoordinatorAPIClient {
       // Check if still in queue
       const queueStatus = await this.getQueueStatus();
       if (queueStatus.pending === 0 && queueStatus.processing === 0) {
-        // Queue is empty but we didn't find our scan - something went wrong
-        // Check one more time for the server
-        if (server && server.lastScannedAt) {
+        // Queue is empty, do one final check for the server
+        const finalServer = await this.getServerByAddress(host, port);
+        if (finalServer && finalServer.lastScannedAt && finalServer.latestResult) {
           logger.debug(`[CoordinatorAPI] Server scan found in final check: ${serverAddress}`);
-          return this.resultToScanResult(server.latestResult);
+          return this.resultToScanResult(finalServer.latestResult);
         }
         throw new Error('Scan completed but result not found');
       }

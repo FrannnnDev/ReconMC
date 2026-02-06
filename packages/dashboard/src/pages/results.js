@@ -685,6 +685,9 @@ function showScanDetail(scan) {
   const result = scan.result;
   const errorMessage = scan.errorMessage;
 
+  // Generate a consistent ID for this scan detail rendering
+  const scanId = `scan-${scan.timestamp?.replace(/[^0-9]/g, '') || Date.now()}`;
+
   let html = '';
 
   if (errorMessage) {
@@ -753,7 +756,6 @@ function showScanDetail(scan) {
       const online = Math.max(0, Number(data.players.online) || 0);
       const max = Math.max(0, Number(data.players.max) || 0);
       const sample = data.players.sample;
-      const scanId = `scan-${Date.now()}`;
 
       html += `
         <div class="detail-section">
@@ -943,7 +945,7 @@ function showScanDetail(scan) {
   detail.innerHTML = html;
 
   // Add event listener for player list toggle
-  const toggleBtn = document.getElementById(`toggle-players-${scan.timestamp?.replace(/[^0-9]/g, '') || 'scan-' + Date.now()}`);
+  const toggleBtn = document.getElementById(`toggle-players-${scanId}`);
   if (toggleBtn) {
     toggleBtn.addEventListener('click', () => {
       const scanId = toggleBtn.id.replace('toggle-players-', '');

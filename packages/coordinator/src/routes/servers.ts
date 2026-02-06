@@ -7,7 +7,7 @@ import {
   deleteServer,
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
-import { eq } from 'drizzle-orm';
+import { eq, or, sql } from 'drizzle-orm';
 import { servers } from '../db/schema.js';
 
 export async function serverRoutes(fastify: FastifyInstance) {
@@ -53,6 +53,44 @@ export async function serverRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to list servers', message: String(err) });
+      }
+    }
+  );
+
+  /**
+   * GET /api/servers/by-address/:address
+   * Get server by address (hostname:port or hostname)
+   * This is useful for Discord bot to find scan results without pagination
+   */
+  fastify.get<{ Params: { address: string } }>(
+    '/servers/by-address/:address',
+    async (request, reply) => {
+      try {
+        const address = request.params.address;
+        // Parse address to handle both "host:port" and "host" formats
+        const [hostPart, portPart] = address.split(':');
+        const host = hostPart ?? address;
+        const port = portPart ? parseInt(portPart, 10) : 25565;
+
+        // Try exact match first, then match by hostname + port
+        const [server] = await db
+          .select()
+          .from(servers)
+          .where(
+            or(
+              eq(servers.serverAddress, address),
+              sql`${servers.hostname} = ${host} AND ${servers.port} = ${port}`
+            )
+          )
+          .limit(1);
+
+        if (!server) {
+          return reply.code(404).send({ error: 'Server not found' });
+        }
+        return reply.send(server);
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.code(500).send({ error: 'Failed to get server', message: String(err) });
       }
     }
   );
