@@ -195,11 +195,60 @@ export async function claimFromQueue(db: Db, agentId: string): Promise<ClaimedQu
   const redis = getRedisClient();
 
   if (redis && redis.status === 'ready') {
-    return claimFromQueueRedis(db, redis, agentId);
+    // Check if Redis queue is empty - if so, sync from PostgreSQL
+    const redisPendingCount = await redis.llen(REDIS_KEYS.QUEUE_PENDING);
+    if (redisPendingCount === 0) {
+      await syncPostgresToRedis(db, redis);
+    }
+
+    // Try Redis first for fast claiming
+    const result = await claimFromQueueRedis(db, redis, agentId);
+    if (result !== null) {
+      return result;
+    }
+    // Redis had items but couldn't claim (no resources)
+    return null;
   }
 
   // Fallback to PostgreSQL
   return claimFromQueuePostgres(db, agentId);
+}
+
+/**
+ * Sync pending items from PostgreSQL to Redis
+ * Called when Redis queue is empty but PostgreSQL has items
+ */
+async function syncPostgresToRedis(
+  db: Db,
+  redis: NonNullable<ReturnType<typeof getRedisClient>>
+): Promise<void> {
+  try {
+    // Get pending items from PostgreSQL
+    const pendingItems = await db
+      .select()
+      .from(scanQueue)
+      .where(eq(scanQueue.status, 'pending'))
+      .limit(1000); // Sync up to 1000 items at a time
+
+    if (pendingItems.length === 0) return;
+
+    // Add each item to Redis
+    for (const item of pendingItems) {
+      const key = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
+      const itemData = JSON.stringify({
+        id: item.id,
+        serverAddress: item.serverAddress,
+        resolvedIp: item.resolvedIp,
+        port: item.port,
+        hostname: item.hostname,
+      });
+      await redis.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+      await redis.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, item.id);
+    }
+  } catch (err) {
+    // Log but don't fail - sync is best-effort
+    console.error('Error syncing PostgreSQL to Redis:', err);
+  }
 }
 
 /**
