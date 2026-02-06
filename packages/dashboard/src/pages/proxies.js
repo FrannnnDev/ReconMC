@@ -9,6 +9,7 @@ export async function render(container) {
     <div class="flex flex-between mb-3">
       <h2>Proxies</h2>
       <div class="flex gap-sm">
+        <button class="btn btn-secondary" id="export-proxies-btn">Export JSON</button>
         <button class="btn btn-secondary" id="import-proxies-btn">Import File</button>
         <button class="btn btn-primary" id="add-proxy-btn">+ Add Proxy</button>
       </div>
@@ -35,6 +36,7 @@ export async function render(container) {
 
   document.getElementById('add-proxy-btn').addEventListener('click', showAddProxyModal);
   document.getElementById('import-proxies-btn').addEventListener('click', showImportProxiesModal);
+  document.getElementById('export-proxies-btn').addEventListener('click', exportProxies);
 
   await loadProxies();
   refreshInterval = setInterval(loadProxies, 5000);
@@ -217,4 +219,23 @@ function showImportProxiesModal() {
       showToast(`Error importing proxies: ${error.message}`, 'error');
     }
   });
+}
+
+async function exportProxies() {
+  try {
+    const proxies = await api.exportProxies();
+    const dataStr = JSON.stringify(proxies, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `reconmc-proxies-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${proxies.length} proxies`, 'success');
+  } catch (error) {
+    showToast(`Error exporting proxies: ${error.message}`, 'error');
+  }
 }

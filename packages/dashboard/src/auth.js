@@ -2,6 +2,9 @@
 const API_KEY_STORAGE_KEY = 'reconmc_api_key';
 const AUTH_DISABLED_KEY = 'reconmc_auth_disabled';
 
+// Import API_BASE - will be replaced by vite define at build time
+const API_BASE = import.meta.env.COORDINATOR_URL || '/api';
+
 // Cache for auth disabled status
 let authDisabledCache = null;
 let authCheckPromise = null;
@@ -71,7 +74,7 @@ export async function isAuthDisabled() {
  */
 async function checkServerAuthStatus() {
   try {
-    const response = await fetch(`${window.COORDINATOR_URL || '/api'}/auth/status`);
+    const response = await fetch(`${API_BASE}/auth/status`);
     if (response.ok) {
       const data = await response.json();
       // If authRequired is false, then auth is disabled

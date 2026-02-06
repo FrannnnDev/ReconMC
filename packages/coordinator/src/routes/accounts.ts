@@ -24,6 +24,18 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
+  // Export accounts (returns all account data including tokens for re-importing)
+  fastify.get('/accounts/export', async (_request, reply) => {
+    const list = await db.select({
+      type: accounts.type,
+      username: accounts.username,
+      accessToken: accounts.accessToken,
+      refreshToken: accounts.refreshToken,
+      maxConcurrent: accounts.maxConcurrent,
+    }).from(accounts).where(eq(accounts.isActive, true));
+    return reply.send(list);
+  });
+
   fastify.post<{
     Body: {
       type: string;

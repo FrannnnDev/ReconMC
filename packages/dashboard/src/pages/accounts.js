@@ -10,6 +10,7 @@ export async function render(container) {
     <div class="flex flex-between mb-3">
       <h2>Accounts</h2>
       <div class="flex gap-sm">
+        <button class="btn btn-secondary" id="export-accounts-btn">Export JSON</button>
         <button class="btn btn-secondary" id="import-accounts-btn">Import JSON</button>
         <button class="btn btn-primary" id="add-account-btn">+ Add Account</button>
       </div>
@@ -36,6 +37,7 @@ export async function render(container) {
 
   document.getElementById('add-account-btn').addEventListener('click', showAddAccountModal);
   document.getElementById('import-accounts-btn').addEventListener('click', showImportAccountsModal);
+  document.getElementById('export-accounts-btn').addEventListener('click', exportAccounts);
 
   await loadAccounts();
   refreshInterval = setInterval(() => {
@@ -319,4 +321,23 @@ function showImportAccountsModal() {
       showToast(`Error importing accounts: ${error.message}`, 'error');
     }
   });
+}
+
+async function exportAccounts() {
+  try {
+    const accounts = await api.exportAccounts();
+    const dataStr = JSON.stringify(accounts, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `reconmc-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${accounts.length} accounts`, 'success');
+  } catch (error) {
+    showToast(`Error exporting accounts: ${error.message}`, 'error');
+  }
 }

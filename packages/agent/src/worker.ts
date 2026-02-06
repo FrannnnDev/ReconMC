@@ -117,7 +117,7 @@ async function reportRefreshedTokens(base: string, accountId: string, tokens: {
       body: JSON.stringify(tokens),
     });
     if (res.ok) {
-      logger.info(`[Agent] Reported refreshed tokens for account ${accountId}`);
+      logger.info(`[Agent] Reported refreshed tokens for account (UUID redacted)`);
     } else {
       logger.warn(`[Agent] Failed to report refreshed tokens: HTTP ${res.status}`);
     }

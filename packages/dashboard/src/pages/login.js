@@ -1,5 +1,8 @@
 import { setApiKey, isValidApiKeyFormat } from '../auth.js';
 
+// Use same API_BASE as auth.js - will be replaced by vite define at build time
+const API_BASE = import.meta.env.COORDINATOR_URL || '/api';
+
 export async function render(container) {
   container.innerHTML = `
     <div class="login-container">
@@ -64,7 +67,7 @@ export async function render(container) {
 
     try {
       // Verify API key by fetching health endpoint
-      const response = await fetch(`${window.COORDINATOR_URL || '/api'}/health`, {
+      const response = await fetch(`${API_BASE}/health`, {
         headers: {
           'X-API-Key': apiKey
         }
@@ -72,7 +75,7 @@ export async function render(container) {
 
       // Health check doesn't require auth, so let's try a protected endpoint
       // Try fetching agents (requires auth)
-      const agentsResponse = await fetch(`${window.COORDINATOR_URL || '/api'}/agents`, {
+      const agentsResponse = await fetch(`${API_BASE}/agents`, {
         headers: {
           'X-API-Key': apiKey
         }

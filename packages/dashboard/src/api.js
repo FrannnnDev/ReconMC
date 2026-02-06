@@ -98,6 +98,8 @@ export const api = {
     body: JSON.stringify({}),
   }),
 
+  exportAccounts: () => fetchJSON(`${API_BASE}/accounts/export`),
+
   // Proxies
   getProxies: () => fetchJSON(`${API_BASE}/proxies`),
 
@@ -119,4 +121,6 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ content }),
   }),
+
+  exportProxies: () => fetchJSON(`${API_BASE}/proxies/export`),
 };

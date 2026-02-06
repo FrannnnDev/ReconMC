@@ -86,6 +86,19 @@ export async function proxyRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
+  // Export proxies (returns all proxy data including passwords for re-importing)
+  fastify.get('/proxies/export', async (_request, reply) => {
+    const list = await db.select({
+      host: proxies.host,
+      port: proxies.port,
+      username: proxies.username,
+      password: proxies.password,
+      protocol: proxies.protocol,
+      maxConcurrent: proxies.maxConcurrent,
+    }).from(proxies).where(eq(proxies.isActive, true));
+    return reply.send(list);
+  });
+
   fastify.post<{
     Body: {
       host: string;
