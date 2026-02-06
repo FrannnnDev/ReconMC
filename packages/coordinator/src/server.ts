@@ -18,6 +18,10 @@ const __dirname = path.dirname(__filename);
 
 function getCorsOrigin(allowedOrigins: string[] | undefined) {
   if (allowedOrigins?.length) {
+    // Allow all origins if * is in the list (dev mode)
+    if (allowedOrigins.includes('*')) {
+      return true;
+    }
     return (reqOrigin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
       cb(null, !reqOrigin || allowedOrigins.includes(reqOrigin));
     };

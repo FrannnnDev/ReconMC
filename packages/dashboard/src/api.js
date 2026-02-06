@@ -1,6 +1,7 @@
 import { getApiKey } from './auth.js';
 
-const API_BASE = window.COORDINATOR_URL || '/api';
+// Will be replaced by vite define at build time
+const API_BASE = import.meta.env.COORDINATOR_URL || '/api';
 
 async function fetchJSON(url, options = {}) {
   const headers = { ...options.headers };

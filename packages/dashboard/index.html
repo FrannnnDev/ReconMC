@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReconMC Dashboard</title>
   <link rel="stylesheet" href="/src/style.css">
+  <script>
+    // Set coordinator URL from build-time env var (for production builds)
+    // For dev, this gets set by Vite's import.meta.env
+    window.COORDINATOR_URL = '__VITE_COORDINATOR_URL__';
+  </script>
 </head>
 <body>
   <div id="app"></div>
