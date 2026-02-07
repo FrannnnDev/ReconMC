@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "test": "node --test"
+    "test": "tsx --test src/**/*.test.ts"
   },
   "keywords": [
     "minecraft",
@@ -20,6 +20,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

@@ -638,16 +638,12 @@ function renderServerHistory(container) {
       const statusIcon = isOnline ? '✓' : '✗';
       const statusClass = isOnline ? 'online' : 'offline';
       const time = scan.timestamp ? formatRelativeTime(scan.timestamp) : 'Unknown';
-      const timestampAttr = scan.timestamp ? escapeHtml(scan.timestamp) : '';
 
       return `
         <div class="task-item${index === selectedScanIndex ? ' active' : ''}" data-index="${index}">
           <div class="task-header">
             <span class="task-address">Scan #${allScans.length - index}</span>
-            <div class="flex flex-gap" style="align-items: center;">
-              <span class="badge ${statusClass}">${statusIcon} ${isOnline ? 'Online' : 'Offline'}</span>
-              <button class="btn btn-sm btn-danger delete-scan-btn" data-timestamp="${timestampAttr}" title="Delete this scan">×</button>
-            </div>
+            <span class="badge ${statusClass}">${statusIcon} ${isOnline ? 'Online' : 'Offline'}</span>
           </div>
           <div class="task-meta">
             <span class="task-duration text-muted">
@@ -659,39 +655,12 @@ function renderServerHistory(container) {
     }).join('');
 
     historyList.querySelectorAll('.task-item').forEach(item => {
-      item.addEventListener('click', (e) => {
-        // Don't trigger if clicking the delete button
-        if (e.target.classList.contains('delete-scan-btn')) return;
+      item.addEventListener('click', () => {
         selectedScanIndex = parseInt(item.dataset.index);
         historyList.querySelectorAll('.task-item').forEach(i => i.classList.remove('active'));
         item.classList.add('active');
         showScanDetail(allScans[selectedScanIndex]);
         loadLogs(allScans[selectedScanIndex]?.errorMessage ? null : allScans[selectedScanIndex]);
-      });
-    });
-
-    // Delete scan button handlers
-    historyList.querySelectorAll('.delete-scan-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const timestamp = btn.dataset.timestamp;
-        if (!timestamp) return;
-
-        if (!confirm('Delete this scan from history?')) return;
-
-        try {
-          await api.deleteScanHistory(currentServerId, timestamp);
-          showToast('Scan deleted', 'success');
-          // Reload server data and re-render
-          const updatedServer = await api.getServer(currentServerId);
-          if (updatedServer) {
-            currentServer = updatedServer;
-            selectedScanIndex = 0;
-            renderServerHistory(mainContainer);
-          }
-        } catch (error) {
-          showToast(`Error deleting scan: ${error.message}`, 'error');
-        }
       });
     });
 

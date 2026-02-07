@@ -84,7 +84,7 @@ const MAX_JSON_DEPTH = 32;
 /**
  * Check JSON object depth to prevent stack overflow attacks
  */
-function getJsonDepth(value: unknown, currentDepth = 0): number {
+export function getJsonDepth(value: unknown, currentDepth = 0): number {
   if (currentDepth > MAX_JSON_DEPTH) {
     return currentDepth;
   }
@@ -92,9 +92,12 @@ function getJsonDepth(value: unknown, currentDepth = 0): number {
     return currentDepth;
   }
   if (Array.isArray(value)) {
+    if (value.length === 0) return currentDepth + 1;
     return Math.max(...value.map(v => getJsonDepth(v, currentDepth + 1)));
   }
-  return Math.max(...Object.values(value as Record<string, unknown>).map(v => getJsonDepth(v, currentDepth + 1)));
+  const vals = Object.values(value as Record<string, unknown>);
+  if (vals.length === 0) return currentDepth + 1;
+  return Math.max(...vals.map(v => getJsonDepth(v, currentDepth + 1)));
 }
 
 /**
@@ -242,8 +245,8 @@ export class MinecraftScanner {
     this.debug = process.env.MC_DEBUG === 'true';
 
     // Validate port
-    if (this.options.port < 0 || this.options.port > 65535) {
-      throw new Error('Port number must be between 0 and 65535');
+    if (this.options.port < 1 || this.options.port > 65535) {
+      throw new Error('Port number must be between 1 and 65535');
     }
 
     if (this.options.proxy) {
